@@ -1,0 +1,47 @@
+services:
+  frontend:
+    build:
+      context: ./my-fullstack-app/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    networks:
+      - frontend
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: ./my-fullstack-app/backend
+      dockerfile: Dockerfile
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      - mysql
+  mysql:
+    image: debezium/example-mysql:2.7.3.Final
+    ports:
+      - "3001:3000"
+    env_file:
+      - ./my-fullstack-app/.env
+    healthcheck:
+      # mysqladmin is the MySQL command-line client included in the official image.
+      # "ping" sends a ping to MySQL and returns
+      # {"ok": 1} if MySQL is ready to accept connections.
+      # This is the official way to check MySQL health recommended
+      # by MySQL's own documentation.
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      # Give MySQL 30 seconds to initialize before the first check runs.
+      # MySQL takes the longest to start among our three services.
+      start_period: 30s
+    networks:
+      - backend
+
+networks:
+  frontend:
+  backend:
