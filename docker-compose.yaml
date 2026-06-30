@@ -14,39 +14,52 @@ services:
     build:
       context: ./my-fullstack-app/backend
       dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - DB_HOST=mysql
+      - KAFKA_BROKER=kafka:9092 # Inside the backend network, it connects via the service name and internal port
     networks:
       - frontend
       - backend
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
   mysql:
     image: debezium/example-mysql:2.5.4.Final
     ports:
-      - "3001:3000"
+      - "3306:3306" # Standardized back to native MySQL ports mapping
     env_file:
       - ./my-fullstack-app/.env
     healthcheck:
-      # mysqladmin is the MySQL command-line client included in the official image.
-      # "ping" sends a ping to MySQL and returns
-      # {"ok": 1} if MySQL is ready to accept connections.
-      # This is the official way to check MySQL health recommended
-      # by MySQL's own documentation.
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-
       interval: 10s
       timeout: 5s
       retries: 3
-      # Give MySQL 30 seconds to initialize before the first check runs.
-      # MySQL takes the longest to start among our three services.
       start_period: 30s
     networks:
       - backend
     volumes:
-      - mysql_data:/var/lib/mysql # <--- THIS MAKES IT STATEFUL
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
       - ./empty.sql:/docker-entrypoint-initdb.d/inventory.sql
+
+  kafka:
+    image: apache/kafka:4.3.1
+    ports:
+      - "9094:9094" # Avoids host port conflicts while exposing external access
+    env_file:
+      - ./my-fullstack-app/.env
+    networks:
+      - backend # <--- PLACED IN THE BACKEND NETWORK WITH THE NODE APP AND MYSQL
+
 volumes:
   mysql_data:
     driver: local
+
 networks:
   frontend:
   backend:

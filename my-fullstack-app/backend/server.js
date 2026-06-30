@@ -1,9 +1,12 @@
 const express = require('express');
+const cors = require('cors'); // --- IMPORT CORS FOR CROSS-ORIGIN REQUESTS ---
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const mysql = require('mysql2');
+const { Kafka } = require('kafkajs'); // --- IMPORT KAFKA ---
 
 const app = express();
+app.use(cors()); // --- ENABLE CORS POLICY FOR FRONTEND ACCESS ---
 app.use(express.json());
 
 // --- DATABASE CONNECTION POOL ---
@@ -18,10 +21,30 @@ const db = mysql.createPool({
   queueLimit: 0
 });
 
+// --- KAFKA CLIENT CONFIGURATION ---
+const kafka = new Kafka({
+  clientId: 'task-manager-backend',
+  brokers: [process.env.KAFKA_BROKER || 'kafka:9092'] //  FIXED: Corrected default internal port to 9092
+});
+
+const producer = kafka.producer();
+
+async function connectKafka() {
+  try {
+    await producer.connect();
+    console.log('Successfully connected to Apache Kafka Broker');
+  } catch (err) {
+    console.error('Failed to connect to Kafka, retrying in 5 seconds...', err);
+    setTimeout(connectKafka, 5000);
+  }
+}
+connectKafka();
+
 // --- SCHEMA & STRUCTURAL INITIALIZATION ---
 function initializeDatabaseWithRetry() {
   console.log("Attempting to connect to database and initialize schema...");
 
+  // FIXED: Removed the trailing syntax typo here
   db.query(`
     CREATE TABLE IF NOT EXISTS users (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -61,17 +84,27 @@ function initializeDatabaseWithRetry() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
-    `);
-
-    // Seed default admin securely with bcrypt hashing
-    const saltRounds = 10;
-    bcrypt.hash('password', saltRounds, (hashErr, hashedPassword) => {
-      if (!hashErr) {
-        db.query(
-          'INSERT IGNORE INTO users (id, username, password) VALUES (1, "admin", ?)',
-          [hashedPassword]
-        );
-      }
+    `, () => {
+      // Clear out any old or conflicted admin row records from prior init.sql loops
+      db.query('DELETE FROM users WHERE id = 1 OR username = "admin"', () => {
+        // Seed default admin securely with fresh runtime bcrypt hashing
+        const saltRounds = 10;
+        bcrypt.hash('password', saltRounds, (hashErr, hashedPassword) => {
+          if (!hashErr) {
+            db.query(
+              'INSERT INTO users (id, username, password) VALUES (1, "admin", ?)',
+              [hashedPassword],
+              (insertErr) => {
+                if (insertErr) {
+                  console.error("Database seeding failure:", insertErr);
+                } else {
+                  console.log("✅ Admin user seeded successfully with password: 'password'!");
+                }
+              }
+            );
+          }
+        });
+      });
     });
   });
 }
@@ -160,13 +193,25 @@ app.post('/tasks', authenticateToken, (req, res) => {
   db.query(queryInsert, [title.trim(), description || '', req.user.id], (err, result) => {
     if (err) return res.status(500).json({ error: 'Database execution write failure for task.' });
 
-    res.status(201).json({
+    const newTask = {
       id: result.insertId,
       title: title.trim(),
       description: description || '',
       status: 'To Do',
       user_id: req.user.id
+    };
+
+    // --- KAFKA EVENT FOR TASK CREATION ---
+    producer.send({
+      topic: 'task-events',
+      messages: [
+        { key: String(newTask.id), value: JSON.stringify({ event: 'TASK_CREATED', data: newTask }) }
+      ]
+    }).catch((kafkaErr) => {
+      console.error('Failed to dispatch TASK_CREATED event to Kafka:', kafkaErr);
     });
+
+    res.status(201).json(newTask);
   });
 });
 
@@ -182,6 +227,16 @@ app.patch('/tasks/:id', authenticateToken, (req, res) => {
     if (err) return res.status(500).json({ error: 'Task patch modifications rejected.' });
     if (result.affectedRows === 0) return res.status(404).json({ error: 'Task not found or unauthorized.' });
 
+    // --- KAFKA EVENT FOR TASK UPDATE ---
+    producer.send({
+      topic: 'task-events',
+      messages: [
+        { key: String(taskId), value: JSON.stringify({ event: 'TASK_UPDATED', data: { id: parseInt(taskId), status, user_id: req.user.id } }) }
+      ]
+    }).catch((kafkaErr) => {
+      console.error('Failed to dispatch TASK_UPDATED event to Kafka:', kafkaErr);
+    });
+
     res.json({ id: parseInt(taskId), status });
   });
 });
@@ -194,6 +249,16 @@ app.delete('/tasks/:id', authenticateToken, (req, res) => {
   db.query(queryDelete, [taskId, req.user.id], (err, result) => {
     if (err) return res.status(500).json({ error: 'Database removal execution error.' });
     if (result.affectedRows === 0) return res.status(404).json({ error: 'Task not found or unauthorized.' });
+
+    // --- KAFKA EVENT FOR TASK DELETION ---
+    producer.send({
+      topic: 'task-events',
+      messages: [
+        { key: String(taskId), value: JSON.stringify({ event: 'TASK_DELETED', data: { id: parseInt(taskId), user_id: req.user.id } }) }
+      ]
+    }).catch((kafkaErr) => {
+      console.error('Failed to dispatch TASK_DELETED event to Kafka:', kafkaErr);
+    });
 
     res.json({ message: `Task ${taskId} dropped successfully.` });
   });
