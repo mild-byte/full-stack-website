@@ -1,0 +1,65 @@
+# Dependencies
+node_modules/
+**/node_modules/
+.pnp
+.pnp.js
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# Build output
+dist/
+build/
+**/dist/
+**/build/
+.next/
+out/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Logs (log4js and friends)
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Docker / container volumes (MySQL, Kafka, Zookeeper, Debezium, etc.)
+**/mysql-data/
+**/kafka-data/
+**/zookeeper-data/
+**/connect-data/
+**/kafka-logs/
+**/zookeeper-logs/
+docker-compose.override.yaml
+docker-compose.override.yml
+# Testing / coverage
+coverage/
+*.lcov
+.nyc_output/
+
+# Editor / IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Misc caches
+.cache/
+.eslintcache
+.parcel-cache/
+*.tsbuildinfo
