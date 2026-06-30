@@ -20,7 +20,7 @@ services:
     depends_on:
       - mysql
   mysql:
-    image: debezium/example-mysql:2.7.3.Final
+    image: debezium/example-mysql:2.5.4.Final
     ports:
       - "3001:3000"
     env_file:
@@ -41,7 +41,12 @@ services:
       start_period: 30s
     networks:
       - backend
-
+    volumes:
+      - mysql_data:/var/lib/mysql # <--- THIS MAKES IT STATEFUL
+      - ./empty.sql:/docker-entrypoint-initdb.d/inventory.sql
+volumes:
+  mysql_data:
+    driver: local
 networks:
   frontend:
   backend:
