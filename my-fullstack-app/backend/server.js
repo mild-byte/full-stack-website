@@ -1,17 +1,24 @@
 const express = require('express');
-const cors = require('cors'); // --- IMPORT CORS FOR CROSS-ORIGIN REQUESTS ---
+const cors = require('cors');
+const log4js = require('log4js'); // --- ADDED LOG4JS ---
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const mysql = require('mysql2');
-const { Kafka } = require('kafkajs'); // --- IMPORT KAFKA ---
+const { Kafka } = require('kafkajs');
 
 const app = express();
-app.use(cors()); // --- ENABLE CORS POLICY FOR FRONTEND ACCESS ---
+app.use(cors());
 app.use(express.json());
+
+// --- CONFIGURE LOG4JS ---
+log4js.configure({
+  appenders: { console: { type: 'stdout' } },
+  categories: { default: { appenders: ['console'], level: 'info' } }
+});
+const logger = log4js.getLogger();
 
 // --- DATABASE CONNECTION POOL ---
 const db = mysql.createPool({
-  // Matches your exact Docker Compose service name 'mysql'
   host: process.env.DB_HOST || 'mysql',
   user: process.env.DB_USER || 'myuser',
   password: process.env.DB_PASSWORD || 'mypassword',
@@ -24,7 +31,7 @@ const db = mysql.createPool({
 // --- KAFKA CLIENT CONFIGURATION ---
 const kafka = new Kafka({
   clientId: 'task-manager-backend',
-  brokers: [process.env.KAFKA_BROKER || 'kafka:9092'] //  FIXED: Corrected default internal port to 9092
+  brokers: [process.env.KAFKA_BROKER || 'kafka:9092']
 });
 
 const producer = kafka.producer();
@@ -42,9 +49,6 @@ connectKafka();
 
 // --- SCHEMA & STRUCTURAL INITIALIZATION ---
 function initializeDatabaseWithRetry() {
-  console.log("Attempting to connect to database and initialize schema...");
-
-  // FIXED: Removed the trailing syntax typo here
   db.query(`
     CREATE TABLE IF NOT EXISTS users (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -54,15 +58,10 @@ function initializeDatabaseWithRetry() {
   `, (err) => {
     if (err) {
       if (err.code === 'ECONNREFUSED') {
-        console.warn("Database not ready yet. Retrying connection in 3 seconds...");
         setTimeout(initializeDatabaseWithRetry, 3000);
-      } else {
-        console.error("Database schema initialization error:", err);
       }
       return;
     }
-
-    console.log("Successfully connected! Initializing tables...");
 
     db.query(`
       CREATE TABLE IF NOT EXISTS user_tokens (
@@ -85,23 +84,11 @@ function initializeDatabaseWithRetry() {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `, () => {
-      // Clear out any old or conflicted admin row records from prior init.sql loops
       db.query('DELETE FROM users WHERE id = 1 OR username = "admin"', () => {
-        // Seed default admin securely with fresh runtime bcrypt hashing
         const saltRounds = 10;
         bcrypt.hash('password', saltRounds, (hashErr, hashedPassword) => {
           if (!hashErr) {
-            db.query(
-              'INSERT INTO users (id, username, password) VALUES (1, "admin", ?)',
-              [hashedPassword],
-              (insertErr) => {
-                if (insertErr) {
-                  console.error("Database seeding failure:", insertErr);
-                } else {
-                  console.log("✅ Admin user seeded successfully with password: 'password'!");
-                }
-              }
-            );
+            db.query('INSERT INTO users (id, username, password) VALUES (1, "admin", ?)', [hashedPassword]);
           }
         });
       });
@@ -109,9 +96,37 @@ function initializeDatabaseWithRetry() {
   });
 }
 
-// Start database check loop
 initializeDatabaseWithRetry();
 
+// --- AUTHENTICATION ENDPOINTS ---
+app.post('/login', (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Required fields missing.' });
+
+  db.query('SELECT * FROM users WHERE username = ?', [username.trim()], (err, results) => {
+    if (err || results.length === 0) return res.status(401).json({ error: 'Invalid credentials.' });
+
+    const user = results[0];
+    bcrypt.compare(password, user.password, (cryptErr, isMatch) => {
+      if (cryptErr || !isMatch) return res.status(401).json({ error: 'Invalid credentials.' });
+
+      // --- LOG4JS ACTIVITY LOGGING ---
+      const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+      logger.info(JSON.stringify({
+        timestamp: new Date().toISOString(),
+        userId: user.id,
+        action: 'USER_LOGIN',
+        ip: ip
+      }));
+
+      const token = crypto.randomBytes(32).toString('hex');
+      db.query('INSERT INTO user_tokens (user_id, token) VALUES (?, ?)', [user.id, token], (insertErr) => {
+        if (insertErr) return res.status(500).json({ error: 'Token record failed.' });
+        res.json({ message: 'Login successful', token });
+      });
+    });
+  });
+});
 
 // --- SECURITY PROTOCOL INTERCEPTOR (MIDDLEWARE) ---
 function authenticateToken(req, res, next) {
@@ -136,40 +151,6 @@ function authenticateToken(req, res, next) {
     next();
   });
 }
-
-
-// --- SECURE AUTHENTICATION ENDPOINTS ---
-
-app.post('/login', (req, res) => {
-  const { username, password } = req.body;
-
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password fields are required.' });
-  }
-
-  db.query('SELECT * FROM users WHERE username = ?', [username.trim()], (err, results) => {
-    if (err) return res.status(500).json({ error: 'Internal server query failure.' });
-    if (results.length === 0) return res.status(401).json({ error: 'Invalid credentials.' });
-
-    const user = results[0];
-
-    // Check hashed password
-    bcrypt.compare(password, user.password, (cryptErr, isMatch) => {
-      if (cryptErr || !isMatch) {
-        return res.status(401).json({ error: 'Invalid credentials.' });
-      }
-
-      // Generate secure high-entropy random token
-      const generatedSessionToken = crypto.randomBytes(32).toString('hex');
-
-      db.query('INSERT INTO user_tokens (user_id, token) VALUES (?, ?)', [user.id, generatedSessionToken], (insertErr) => {
-        if (insertErr) return res.status(500).json({ error: 'Failed to record session token.' });
-        res.json({ message: 'Login successful', token: generatedSessionToken });
-      });
-    });
-  });
-});
-
 
 // --- STATEFUL REST API ENDPOINTS FOR TASKS ---
 
@@ -265,6 +246,4 @@ app.delete('/tasks/:id', authenticateToken, (req, res) => {
 });
 
 const PORT = 5000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Backend running on port ${PORT}`);
-});
+app.listen(PORT, '0.0.0.0', () => console.log(`Backend running on port ${PORT}`));

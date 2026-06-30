@@ -5,7 +5,8 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install
 
-COPY server.js ./
+COPY server.js cdc-consumer.js ./
 
 EXPOSE 5000
-ENTRYPOINT ["node", "server.js"]
+ENTRYPOINT ["node"]
+CMD ["server.js"]

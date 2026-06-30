@@ -16,9 +16,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "5000:5000"
-    environment:
-      - DB_HOST=mysql
-      - KAFKA_BROKER=kafka:9092 # Inside the backend network, it connects via the service name and internal port
+    env_file:
+      - ./my-fullstack-app/.env
     networks:
       - frontend
       - backend
@@ -28,10 +27,38 @@ services:
       kafka:
         condition: service_started
 
+  # Debezium connector that watches MySQL binary logs
+  connect:
+    image: debezium/connect:2.5.4.Final
+    ports:
+      - "8083:8083"
+    env_file:
+      - ./my-fullstack-app/.env
+    networks:
+      - backend
+    depends_on:
+      - kafka
+      - mysql
+
+  # New consumer service to log database changes
+  cdc-consumer:
+    build:
+      context: ./my-fullstack-app/backend
+      dockerfile: Dockerfile
+    command: ["cdc-consumer.js"]
+    restart: unless-stopped
+    env_file:
+      - ./my-fullstack-app/.env
+    networks:
+      - backend
+    depends_on:
+      - kafka
+      - connect
+
   mysql:
     image: debezium/example-mysql:2.5.4.Final
     ports:
-      - "3306:3306" # Standardized back to native MySQL ports mapping
+      - "3306:3306"
     env_file:
       - ./my-fullstack-app/.env
     healthcheck:
@@ -50,11 +77,11 @@ services:
   kafka:
     image: apache/kafka:4.3.1
     ports:
-      - "9094:9094" # Avoids host port conflicts while exposing external access
+      - "9094:9094"
     env_file:
       - ./my-fullstack-app/.env
     networks:
-      - backend # <--- PLACED IN THE BACKEND NETWORK WITH THE NODE APP AND MYSQL
+      - backend
 
 volumes:
   mysql_data:
